@@ -42,6 +42,7 @@ intents.voice_states = True
 bot = commands.Bot(command_prefix="/", intents=intents)
 tree = bot.tree
 queues = {}
+loop_disabled = set()
 current_voice_clients = {}
 playing_tasks = {}
 YDL_OPTIONS = {
@@ -54,7 +55,7 @@ YDL_OPTIONS = {
 async def ensure_connected(interaction):
     voice_channel = interaction.user.voice.channel if interaction.user.voice else None
     if not voice_channel:
-        await interaction.followup.send("Du musst in einem Sprachkanal sein, um Musik zu spielen.", ephemeral=True)
+        await interaction.followup.send("You must be in a voice channel to play music.", ephemeral=True)
         return None
     voice_client = discord.utils.get(bot.voice_clients, guild=interaction.guild)
     if voice_client and voice_client.is_connected():
@@ -67,7 +68,7 @@ async def ensure_connected(interaction):
         return voice_client
     except Exception as e:
         logging.error(f"[CONNECT ERROR] {e}")
-        await interaction.followup.send("Fehler beim Verbinden mit dem Voice-Channel.", ephemeral=True)
+        await interaction.followup.send("Error connecting to the voice channel.", ephemeral=True)
         return None
 async def play_next(guild_id):
     if playing_tasks.get(guild_id, False):
@@ -82,12 +83,12 @@ async def play_next(guild_id):
                 if not queues.get(guild_id):
                     await vc.disconnect()
                     del current_voice_clients[guild_id]
-                    logging.info(f"Queue leer, Bot hat Guild {guild_id} verlassen.")
+                    logging.info(f"Queue empty, bot has left Guild {guild_id}.")
             return
         url, interaction, loop_count = queue.pop(0)
         voice_client = await ensure_connected(interaction)
         if not voice_client:
-            await interaction.followup.send("Verbindung zum Sprachkanal konnte nicht hergestellt werden.", ephemeral=True)
+            await interaction.followup.send("Could not connect to the voice channel.", ephemeral=True)
             return
         current_voice_clients[guild_id] = voice_client
         try:
@@ -99,7 +100,7 @@ async def play_next(guild_id):
                 title = data.get('title', 'Unbekannt')
                 logging.info(f"Spiele: {title}")
         except Exception as e:
-            await interaction.followup.send("Fehler beim Abrufen des Audio-Streams.", ephemeral=True)
+            await interaction.followup.send("Error retrieving audio stream.", ephemeral=True)
             logging.error(f"[YDL ERROR] {e}")
             return
         source = discord.FFmpegPCMAudio(audio_url, **FFMPEG_OPTIONS)
@@ -113,18 +114,22 @@ async def play_next(guild_id):
             except Exception as e:
                 logging.error(f"Error in after_play callback: {e}")
         voice_client.play(audio, after=after_play)
-        await interaction.followup.send(f"**{title}** wird abgespielt.", ephemeral=False)
+        await interaction.followup.send(f"**{title}** is played.", ephemeral=False)
     finally:
         playing_tasks[guild_id] = False
 async def after_play_callback(guild_id, entry):
     url, interaction, loop_count = entry
-    if loop_count == "x" or (isinstance(loop_count, int) and loop_count > 1):
-        if loop_count != "x":
-            loop_count -= 1
-        queues.setdefault(guild_id, []).insert(0, (url, interaction, loop_count))
+    if guild_id not in loop_disabled:
+        if loop_count == "x" or (isinstance(loop_count, int) and loop_count > 1):
+            if loop_count != "x":
+                loop_count -= 1
+            queues.setdefault(guild_id, []).insert(0, (url, interaction, loop_count))
+    else:
+        logging.info(f"Loop is disabled for Guild {guild_id}")
+        loop_disabled.discard(guild_id)
     await play_next(guild_id)
-@tree.command(name="play", description="Spiele Musik via YouTube Link oder Suchbegriff")
-@app_commands.describe(query="YouTube Link, MP3 Link oder Suchbegriff")
+@tree.command(name="play", description="Play music via YouTube link or search term")
+@app_commands.describe(query="YouTube link or search term")
 async def play(interaction: discord.Interaction, query: str):
     await interaction.response.defer()
     guild_id = interaction.guild.id
@@ -133,34 +138,34 @@ async def play(interaction: discord.Interaction, query: str):
     if not vc or not vc.is_playing():
         await play_next(guild_id)
     else:
-        await interaction.followup.send("Zur Playlist hinzugefügt.", ephemeral=True)
-@tree.command(name="loop", description="Wiederholt einen Song mehrfach oder endlos")
-@app_commands.describe(times="Anzahl oder 'x' für endlos", query="YouTube Link oder Suchbegriff")
+        await interaction.followup.send("Added to playlist.", ephemeral=True)
+@tree.command(name="loop", description="Repeats a song multiple times or endlessly")
+@app_commands.describe(times="Number or 'x' for endless", query="YouTube link or search term")
 async def loop(interaction: discord.Interaction, times: str, query: str):
     await interaction.response.defer()
     guild_id = interaction.guild.id
     try:
         count = "x" if times.lower() == "x" else int(times)
     except ValueError:
-        await interaction.followup.send("Ungültiger Wiederholungswert.", ephemeral=True)
+        await interaction.followup.send("Invalid repetition value.", ephemeral=True)
         return
     queues.setdefault(guild_id, []).append((query, interaction, count))
     vc = current_voice_clients.get(guild_id)
     if not vc or not vc.is_playing():
         await play_next(guild_id)
     else:
-        await interaction.followup.send(f"Wiederholungs-Playback hinzugefügt ({times}x).", ephemeral=True)
-@tree.command(name="skip", description="Überspringt den aktuellen Titel")
+        await interaction.followup.send(f"Repeat playback added ({times}x).", ephemeral=True)
+@tree.command(name="skip", description="Skips the current track")
 async def skip(interaction: discord.Interaction):
     await interaction.response.defer()
     guild_id = interaction.guild.id
     vc = current_voice_clients.get(guild_id)
     if vc and vc.is_playing():
         vc.stop()
-        await interaction.followup.send("Übersprungen.", ephemeral=True)
+        await interaction.followup.send("Skipped.", ephemeral=True)
     else:
-        await interaction.followup.send("Es läuft gerade nichts.", ephemeral=True)
-@tree.command(name="skip_all", description="Überspringt alles und stoppt die Wiedergabe")
+        await interaction.followup.send("Nothing is happening right now.", ephemeral=True)
+@tree.command(name="skip_all", description="Skips everything and stops playback")
 async def skip_all(interaction: discord.Interaction):
     await interaction.response.defer()
     guild_id = interaction.guild.id
@@ -168,26 +173,26 @@ async def skip_all(interaction: discord.Interaction):
     vc = current_voice_clients.get(guild_id)
     if vc:
         vc.stop()
-    await interaction.followup.send("Alle Wiedergaben gestoppt und Playlist gelöscht.", ephemeral=True)
-@tree.command(name="stop", description="Pausiert die Wiedergabe")
+    await interaction.followup.send("All playback stopped and playlist deleted.", ephemeral=True)
+@tree.command(name="stop", description="Pauses playback")
 async def stop(interaction: discord.Interaction):
     guild_id = interaction.guild.id
     vc = current_voice_clients.get(guild_id)
     if vc and vc.is_playing():
         vc.pause()
-        await interaction.response.send_message("Wiedergabe pausiert.", ephemeral=True)
+        await interaction.response.send_message("Playback paused.", ephemeral=True)
     else:
-        await interaction.response.send_message("Nichts wird abgespielt.", ephemeral=True)
-@tree.command(name="resume", description="Setzt die Wiedergabe fort")
+        await interaction.response.send_message("Nothing is played.", ephemeral=True)
+@tree.command(name="resume", description="Resumes playback")
 async def resume(interaction: discord.Interaction):
     guild_id = interaction.guild.id
     vc = current_voice_clients.get(guild_id)
     if vc and vc.is_paused():
         vc.resume()
-        await interaction.response.send_message("Wiedergabe fortgesetzt.", ephemeral=True)
+        await interaction.response.send_message("Playback continued.", ephemeral=True)
     else:
-        await interaction.response.send_message("Nichts ist pausiert.", ephemeral=True)
-@tree.command(name="off", description="Bot verlässt den Sprachkanal")
+        await interaction.response.send_message("Nothing is paused.", ephemeral=True)
+@tree.command(name="off", description="Bot leaves the voice channel")
 async def off(interaction: discord.Interaction):
     await interaction.response.defer()
     guild_id = interaction.guild.id
@@ -196,30 +201,29 @@ async def off(interaction: discord.Interaction):
     if vc:
         await vc.disconnect()
         del current_voice_clients[guild_id]
-    await interaction.followup.send("Bot gestoppt und Sprachkanal verlassen.", ephemeral=True)
-@tree.command(name="end_loop", description="Beendet alle Loops und setzt die Wiedergabe fort")
+    await interaction.followup.send("Bot stopped and voice channel left.", ephemeral=True)
+@tree.command(name="end_loop", description="Ends all loops and resumes playback")
 async def end_loop(interaction: discord.Interaction):
     await interaction.response.defer()
     guild_id = interaction.guild.id
+    loop_disabled.add(guild_id)
     if guild_id in queues:
         new_queue = []
         for entry in queues[guild_id]:
             url, inter, loop_count = entry
             new_queue.append((url, inter, 1))
         queues[guild_id] = new_queue
-    await interaction.followup.send("Alle Loops beendet.", ephemeral=True)
+    await interaction.followup.send("All loops are ended. The current songs are played once.", ephemeral=True)
 @bot.event
 async def on_ready():
-    logging.info(f"Bot ist bereit! Angemeldet als {bot.user}")
+    logging.info(f"Bot is ready! Logged in as {bot.user}")
     if GUILD_ID:
         guild = discord.Object(id=GUILD_ID)
         await tree.sync(guild=guild)
-        logging.info(f"Commands für Guild {GUILD_ID} synchronisiert")
+        logging.info(f"Commands for Guild {GUILD_ID} synchronized")
     else:
         await tree.sync()
-        logging.info("Globale Commands synchronisiert.")
-    invite_url = f"https://discord.com/oauth2/authorize?client_id={config['client_id']}&scope=bot%20applications.commands&permissions=2213873984"
-    logging.info(f"Invite Link:\n{invite_url}")
+        logging.info("Global commands synchronized.")
 @bot.event
 async def on_voice_state_update(member, before, after):
     if member == bot.user:
@@ -227,7 +231,7 @@ async def on_voice_state_update(member, before, after):
         vc = current_voice_clients.get(guild_id)
         if vc is None or not vc.is_connected():
             await asyncio.sleep(1)
-            logging.info(f"Bot wurde disconnected in Guild {guild_id}, versuche neu zu verbinden.")
+            logging.info(f"Bot was disconnected in Guild {guild_id}, try reconnecting.")
             voice_channel = after.channel or before.channel
             if voice_channel:
                 try:
@@ -236,10 +240,10 @@ async def on_voice_state_update(member, before, after):
                     if queues.get(guild_id):
                         await play_next(guild_id)
                 except Exception as e:
-                    logging.error(f"Reconnect Fehler in Guild {guild_id}: {e}")
+                    logging.error(f"Reconnect error in Guild {guild_id}: {e}")
 @bot.event
 async def on_command_error(ctx, error):
     logging.error(f"[COMMAND ERROR] {error}")
     if hasattr(ctx, "followup"):
-        await ctx.followup.send("Ein Fehler ist aufgetreten.", ephemeral=True)
+        await ctx.followup.send("An error has occurred.", ephemeral=True)
 bot.run(TOKEN)
