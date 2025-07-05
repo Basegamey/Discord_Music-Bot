@@ -215,6 +215,7 @@ async def end_loop(interaction: discord.Interaction):
         queues[guild_id] = new_queue
     await interaction.followup.send("All loops are ended. The current songs are played once.", ephemeral=True)
 @bot.event
+@bot.event
 async def on_ready():
     logging.info(f"Bot is ready! Logged in as {bot.user}")
     if GUILD_ID:
@@ -224,6 +225,10 @@ async def on_ready():
     else:
         await tree.sync()
         logging.info("Global commands synchronized.")
+    app_info = await bot.application_info()
+    client_id = app_info.id
+    invite_url = f"https://discord.com/oauth2/authorize?client_id={client_id}&permissions=277083450688&scope=bot+applications.commands"
+    logging.info(f"Invite the bot using this link:\n{invite_url}")
 @bot.event
 async def on_voice_state_update(member, before, after):
     if member == bot.user:
@@ -241,6 +246,70 @@ async def on_voice_state_update(member, before, after):
                         await play_next(guild_id)
                 except Exception as e:
                     logging.error(f"Reconnect error in Guild {guild_id}: {e}")
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+    if not message.content.startswith("B;"):
+        return
+    try:
+        command_body = message.content[2:].strip()
+        if command_body.lower().startswith("play "):
+            query = command_body[5:].strip()
+            class DummyInteraction:
+                def __init__(self, message):
+                    self.guild = message.guild
+                    self.user = message.author
+                    self.followup = type('FollowUp', (), {'send': lambda self, content, ephemeral=False: message.channel.send(content)})
+            interaction = DummyInteraction(message)
+            queues.setdefault(message.guild.id, []).append((query, interaction, 1))
+            vc = current_voice_clients.get(message.guild.id)
+            if not vc or not vc.is_playing():
+                await play_next(message.guild.id)
+            else:
+                await message.channel.send("Added to playlist.")
+        elif command_body.lower().startswith("loop "):
+            parts = command_body.split(maxsplit=2)
+            if len(parts) < 3:
+                await message.channel.send("Usage: B;loop [times|'x'] [query]")
+                return
+            times, query = parts[1], parts[2]
+            count = "x" if times.lower() == "x" else int(times)
+            class DummyInteraction:
+                def __init__(self, message):
+                    self.guild = message.guild
+                    self.user = message.author
+                    self.followup = type('FollowUp', (), {'send': lambda self, content, ephemeral=False: message.channel.send(content)})
+            interaction = DummyInteraction(message)
+            queues.setdefault(message.guild.id, []).append((query, interaction, count))
+            vc = current_voice_clients.get(message.guild.id)
+            if not vc or not vc.is_playing():
+                await play_next(message.guild.id)
+            else:
+                await message.channel.send(f"Repeat playback added ({times}x).")
+        elif command_body.lower() == "skip":
+            ctx = await bot.get_context(message)
+            await skip(ctx)
+        elif command_body.lower() == "skip_all":
+            ctx = await bot.get_context(message)
+            await skip_all(ctx)
+        elif command_body.lower() == "stop":
+            ctx = await bot.get_context(message)
+            await stop(ctx)
+        elif command_body.lower() == "resume":
+            ctx = await bot.get_context(message)
+            await resume(ctx)
+        elif command_body.lower() == "off":
+            ctx = await bot.get_context(message)
+            await off(ctx)
+        elif command_body.lower() == "end_loop":
+            ctx = await bot.get_context(message)
+            await end_loop(ctx)
+        else:
+            await message.channel.send("Unknown command.")
+    except Exception as e:
+        logging.error(f"[B;-Handler ERROR] {e}")
+    await bot.process_commands(message)
 @bot.event
 async def on_command_error(ctx, error):
     logging.error(f"[COMMAND ERROR] {error}")
